@@ -1,0 +1,4 @@
+name: infra-base-gcp
+runtime: java
+description: A minimal Google Cloud Java Pulumi program
+
