@@ -1,13 +1,12 @@
-import com.pulumi.Context
-import infra.infraGcpStack
+import com.pulumi.Pulumi
+import corda.gkeHelmStack
 
 
 fun main(args: Array<String>) {
 
-    com.pulumi.Pulumi.run { ctx ->
-
-        infraGcpStack(ctx)
-
+  Pulumi.run {
+      //ctx -> infraGkeStack(ctx)
+      ctx -> gkeHelmStack(ctx)
     }
 
 
