@@ -3,13 +3,13 @@ package corda
 
 import com.pulumi.Context
 import com.pulumi.core.Output
-import com.pulumi.gcp.Config
 import com.pulumi.gcp.compute.Network
 import com.pulumi.gcp.compute.NetworkArgs
 import com.pulumi.gcp.compute.Subnetwork
 import com.pulumi.gcp.compute.SubnetworkArgs
 import com.pulumi.gcp.container.*
 import com.pulumi.gcp.container.inputs.*
+import com.pulumi.gcp.container.outputs.ClusterMasterAuth
 import com.pulumi.kubernetes.Provider
 import com.pulumi.kubernetes.ProviderArgs
 import com.pulumi.kubernetes.apps.v1.Deployment
@@ -21,13 +21,15 @@ import com.pulumi.kubernetes.core.v1.Service
 import com.pulumi.kubernetes.core.v1.ServiceArgs
 import com.pulumi.kubernetes.core.v1.enums.ServiceSpecType
 import com.pulumi.kubernetes.core.v1.inputs.*
+import com.pulumi.kubernetes.helm.v3.Release
+import com.pulumi.kubernetes.helm.v3.ReleaseArgs
 import com.pulumi.kubernetes.meta.v1.inputs.LabelSelectorArgs
 import com.pulumi.kubernetes.meta.v1.inputs.ObjectMetaArgs
 import com.pulumi.resources.CustomResourceOptions
-import java.text.MessageFormat
-import com.pulumi.kubernetes.helm.v3.Release
-import com.pulumi.kubernetes.helm.v3.ReleaseArgs
-import java.io.File
+//import kotlinx.serialization.encodeToString
+//import kotlinx.serialization.json.Json
+//import corda.ClusterConfig
+
 
 
 //TODO Variable to be externalised perhaps via JSON file
@@ -67,24 +69,18 @@ fun gkeHelmStack(ctx: Context) {
         ClusterArgs.builder()
             .initialNodeCount(1)
             .location(REGION)
+            .deletionProtection(false)
             .removeDefaultNodePool(true)
             .network(network.selfLink())
             .subnetwork(subnet.selfLink())
+//            .masterAuth(
+//                ClusterMasterAuthArgs.builder().build()
+//            )
             .build(),
         CustomResourceOptions.builder()
             .dependsOn(subnet)
             .build()
     )
-
-    // Manufacture a GKE-style kubeconfig for authentication
-    val clusterName = String.format(
-        "%s_%s_%s",
-        PROJECT,
-        REGION,
-        NAME
-    )
-
-
 
     val nodePool = NodePool(
         "primary-node-pool",
@@ -114,14 +110,16 @@ fun gkeHelmStack(ctx: Context) {
             .dependsOn(cluster)
             .build()
     )
+    ctx.export("primary-node-pool", nodePool.name())
 
     var kubeconfig = cluster.name().apply{
-            name -> cluster.endpoint().applyValue{
-            endpoint ->
+            name -> cluster.endpoint().apply{
+            endpoint->  cluster.masterAuth().applyValue {
+            clusterMasterAuth ->
             "apiVersion: v1\n" +
                     "clusters:\n" +
                     "- cluster:\n" +
-                    "    certificate-authority-data: " + cluster.masterAuth().applyValue { auth -> auth.clusterCaCertificate() } + "\n" +
+                    "    certificate-authority-data: " +  clusterMasterAuth.clusterCaCertificate()+ "\n" +
                     "    server: https://" + endpoint + "\n" +
                     "  name: " + name + "\n" +
                     "contexts:\n" +
@@ -142,22 +140,71 @@ fun gkeHelmStack(ctx: Context) {
                     "        expiry-key: '{.credential.token_expiry}'\n" +
                     "        token-key: '{.credential.access_token}'\n" +
                     "      name: gcp\n"
-        }
+                }
+            }
     }
 
-    // Create a Kubernetes provider instance that uses our cluster from above.
+//    val kubeconfig = ClusterConfig(
+//         apiVersion = "v1",
+//          clusters = listOf(
+//            Cluster(
+//                cluster = ClusterData(
+//                    certificateAuthorityData =  cluster.masterAuth().applyValue { auth -> auth.clusterCaCertificate()},
+//                    server = "https://${cluster.endpoint()}"
+//                ),
+//                name = cluster.name()
+//            )
+//        ),
+//        contexts = listOf(
+//            Context(
+//                context = ContextData(
+//                    cluster = cluster.name(),
+//                    user = cluster.name()
+//                ),
+//                name = cluster.name()
+//            )
+//        ),
+//        currentContext = cluster.name(),
+//        kind = "Config",
+//        preferences = mapOf(),
+//        users = listOf(
+//            User(
+//                name = cluster.name(),
+//                user = UserConfig(
+//                    authProvider = AuthProvider(
+//                        config = AuthConfig(
+//                            cmdArgs = "config config-helper --format=json",
+//                            cmdPath = "gcloud",
+//                            expiryKey = "{.credential.token_expiry}",
+//                            tokenKey = "{.credential.access_token}"
+//                        ),
+//                        name = "gcp"
+//                    )
+//                )
+//            )
+//        )
+//    )
+
+
+    // Create a Kubernetes provider instance that uses our cluster from above with a secure Kubeconfig
+    //val kubeconfigJson = Json.encodeToString(kubeconfig)
     val clusterProvider = Provider(
-        NAME,
+        NAME.plus("-k8-provider"),
         ProviderArgs.builder()
             .kubeconfig(kubeconfig)
             .build(),
-        CustomResourceOptions.builder()
+         CustomResourceOptions.builder()
             .deleteBeforeReplace(true)
-            .dependsOn(nodePool)
+            .dependsOn(nodePool, cluster)
             .build()
     )
+    //ctx.export("kubeconfig", Output.of(kubeconfig))
 
-    var clusterResourceOptions = CustomResourceOptions.builder().deleteBeforeReplace(true).provider(clusterProvider).build()
+    var clusterResourceOptions = CustomResourceOptions.builder()
+                                        .deleteBeforeReplace(true)
+                                        .provider(clusterProvider)
+                                        .dependsOn(clusterProvider)
+                                        .build()
 
     // Create a Kubernetes Namespace
     var ns = Namespace(
@@ -180,7 +227,9 @@ fun gkeHelmStack(ctx: Context) {
     // Create a NGINX Deployment
     var deployment = Deployment(
         NAME,
-        DeploymentArgs.builder().metadata(metadata).spec(
+        DeploymentArgs.builder()
+            .metadata(metadata)
+            .spec(
             DeploymentSpecArgs.builder().replicas(1).selector(
                 LabelSelectorArgs.builder()
                     .matchLabels(appLabels)
@@ -217,7 +266,7 @@ fun gkeHelmStack(ctx: Context) {
 
     // Create a LoadBalancer Service for the NGINX Deployment
     var service = Service(
-        NAME,
+        NAME.plus("-loadbalancer-service"),
         ServiceArgs.builder().metadata(metadata).spec(
             ServiceSpecArgs.builder().type(Output.ofRight(ServiceSpecType.LoadBalancer)).ports(
                 ServicePortArgs.builder()
@@ -232,7 +281,7 @@ fun gkeHelmStack(ctx: Context) {
 
     // Export the Service name and public LoadBalancer endpoint
     ctx.export("serviceName", service.metadata()
-        .applyValue { m -> m.name().orElseThrow() }
+        .applyValue { m -> m.name() }
     )
 
     ctx.export(
