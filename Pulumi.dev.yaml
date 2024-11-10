@@ -1,2 +1,2 @@
 config:
-  gcp:project: r3-ps-test-01
+  gcp:project: my-gcp-project
